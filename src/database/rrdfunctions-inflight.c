@@ -438,6 +438,8 @@ int rrd_function_run(RRDHOST *host, BUFFER *result_wb, int timeout_s,
         return code;
     }
 
+    // deleted auth check 
+
     if(timeout_s <= 0)
         timeout_s = rdcf->timeout;
 
