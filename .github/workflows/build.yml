@@ -19,6 +19,9 @@ on:
 concurrency: # This keeps multiple instances of the job from running concurrently for the same ref and event type.
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
+permissions:
+  contents: write
+  packages: write
 env:
   DISABLE_TELEMETRY: 1 # Disable telemetry reporting from the agent in our CI.
 jobs:
@@ -379,7 +382,7 @@ jobs:
         run: ./packaging/windows/build.ps1
       - name: Sign Agent Code
         id: sign-agent
-        if: needs.file-check.outputs.run == 'true' && github.event_name != 'pull_request'
+        if: needs.file-check.outputs.run == 'true' && github.event_name != 'pull_request' && github.repository == 'netdata/netdata'
         uses: azure/trusted-signing-action@v0.5.10
         with:
           azure-tenant-id: ${{ secrets.CODE_SIGNING_TENNANT_ID }}
@@ -402,7 +405,7 @@ jobs:
         run: ./packaging/windows/package.ps1
       - name: Sign Installer
         id: sign-installer
-        if: needs.file-check.outputs.run == 'true' && github.event_name != 'pull_request'
+        if: needs.file-check.outputs.run == 'true' && github.event_name != 'pull_request' && github.repository == 'netdata/netdata'
         uses: azure/trusted-signing-action@v0.5.10
         with:
           azure-tenant-id: ${{ secrets.CODE_SIGNING_TENNANT_ID }}
@@ -751,7 +754,7 @@ jobs:
   create-nightly: # Create a nightly build release in netdata/netdata-nightlies
     name: Create Nightly Release
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.type == 'nightly' && github.repository == 'netdata/netdata'
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.type == 'nightly'
     needs:
       - prepare-upload
       - artifact-verification-dist
@@ -764,11 +767,18 @@ jobs:
           path: main
       - name: Checkout Nightly Repo
         id: checkout-nightly
+        if: github.repository == 'netdata/netdata'
         uses: actions/checkout@v5
         with:
           repository: netdata/netdata-nightlies
           path: nightlies
           token: ${{ secrets.NETDATABOT_GITHUB_TOKEN }}
+      - name: Checkout Fork Repo (for forks)
+        id: checkout-fork
+        if: github.repository != 'netdata/netdata'
+        uses: actions/checkout@v5
+        with:
+          path: nightlies
       - name: Retrieve Artifacts
         id: fetch
         uses: Wandalen/wretry.action@v3
@@ -793,18 +803,18 @@ jobs:
           allowUpdates: false
           artifactErrorsFailBuild: true
           artifacts: 'final-artifacts/sha256sums.txt,final-artifacts/netdata-*.tar.gz,final-artifacts/netdata-*.gz.run,final-artifacts/netdata-*.msi'
-          owner: netdata
-          repo: netdata-nightlies
+          owner: ${{ github.repository == 'netdata/netdata' && 'netdata' || github.repository_owner }}
+          repo: ${{ github.repository == 'netdata/netdata' && 'netdata-nightlies' || github.event.repository.name }}
           body: Netdata nightly build for ${{ steps.version.outputs.date }}.
           commit: ${{ steps.version.outputs.commit }}
           makeLatest: true
           tag: ${{ steps.version.outputs.version }}
-          token: ${{ secrets.NETDATABOT_GITHUB_TOKEN }}
+          token: ${{ github.repository == 'netdata/netdata' && secrets.NETDATABOT_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
       - name: Checkout netdata main Repo # Checkout back to netdata/netdata repo to the update latest packaged versions
         id: checkout-netdata
         uses: actions/checkout@v5
         with:
-          token: ${{ secrets.NETDATABOT_GITHUB_TOKEN }}
+          token: ${{ github.repository == 'netdata/netdata' && secrets.NETDATABOT_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
       - name: Init python environment for publish release metadata
         uses: actions/setup-python@v6
         id: init-python
@@ -885,7 +895,7 @@ jobs:
   upload-release: # Create the draft release and upload the build artifacts.
     name: Create Release Draft
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.type == 'release' && github.repository == 'netdata/netdata'
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.type == 'release'
     needs:
       - artifact-verification-dist
       - artifact-verification-static
@@ -913,7 +923,7 @@ jobs:
           artifacts: 'final-artifacts/sha256sums.txt,final-artifacts/netdata-*.tar.gz,final-artifacts/netdata-*.gz.run,final-artifacts/netdata-*.msi'
           draft: true
           tag: ${{ needs.normalize-tag.outputs.tag }}
-          token: ${{ secrets.NETDATABOT_GITHUB_TOKEN }}
+          token: ${{ github.repository == 'netdata/netdata' && secrets.NETDATABOT_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
       - name: Failure Notification
         uses: rtCamp/action-slack-notify@v2
         env:
@@ -932,6 +942,7 @@ jobs:
           ${{
             failure()
             && github.event_name == 'workflow_dispatch'
+            && github.repository == 'netdata/netdata'
           }}
       - name: Success Notification
         uses: rtCamp/action-slack-notify@v2
@@ -947,6 +958,7 @@ jobs:
           ${{
             success()
             && github.event_name == 'workflow_dispatch'
+            && github.repository == 'netdata/netdata'
           }}
 
   # Remaining jobs are only used for CI checks, and not as part of the release process
