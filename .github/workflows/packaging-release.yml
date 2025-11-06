@@ -250,6 +250,9 @@ jobs:
             #### Step 1: Download
             Download the archive for your distribution, version, and architecture:
             ```bash
+            # Example for Debian 12 on amd64
+            wget https://github.com/${{ github.repository }}/releases/download/latest/debian-12-amd64-packages.zip
+
             # Example for Ubuntu 24.04 on amd64
             wget https://github.com/${{ github.repository }}/releases/download/latest/ubuntu-24.04-amd64-packages.zip
             ```
@@ -263,20 +266,27 @@ jobs:
             sha256sum -c SHA256SUMS --ignore-missing
             ```
 
-            #### Step 3: Extract Archive
+            #### Step 3: Update & install dependencies
             ```bash
-            # Extract the zip file
-            unzip ubuntu-24.04-amd64-packages.zip
-
-            # Navigate to extracted directory
-            cd ubuntu-24.04-amd64-packages/
+            sudo apt update
+            sudo apt upgrade -y
+            sudo apt install -y unzip libsystemd0 libuv1 libjudydebian1 liblz4-1 zlib1g
             ```
 
-            #### Step 4: Install Packages
+            #### Step 4: Extract Archive
+            ```bash
+            # Extract the zip file
+            unzip debian-12-amd64-packages.zip
+
+            # Navigate to extracted directory
+            cd debian-12-amd64-packages
+            ```
+
+            #### Step 5: Install Packages
 
             **For Debian/Ubuntu (.deb):**
             ```bash
-            sudo dpkg -i netdata_*.deb
+            sudo dpkg -i netdata*.deb
             sudo apt-get install -f  # Fix any dependency issues
             ```
 
@@ -289,9 +299,7 @@ jobs:
 
             ### Notes
             - ⚠️ Packages are **unsigned** (fork build)
-            - For official signed packages, visit https://github.com/netdata/netdata
-            - Use `--force-confold` with dpkg if you have custom configurations
-            - Each archive may contain multiple package files (main package + plugins)
+            - Each archive contains multiple package files (main package + plugins)
             - If some archives are missing, check the [workflow run](${{ github.event.workflow_run.html_url }}) for build errors
 
           # Mark as latest release
