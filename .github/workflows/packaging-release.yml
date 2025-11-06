@@ -7,10 +7,17 @@
 #
 # Purpose:
 #   - Runs after packaging workflow completion on master branch (success or failure)
-#   - Downloads only successful package artifacts
-#   - Creates/updates a single "latest" release with available packages
+#   - Downloads successful package artifact archives (one per distro-version-arch)
+#   - Creates zip archives for each build job's packages
+#   - Uploads archives to a single "latest" release (not individual packages)
 #   - Gracefully handles partial build failures
 #   - Does not fail if some package builds failed
+#
+# Release Structure:
+#   - Each asset is a .zip archive containing packages for one distro-version-arch
+#   - Example: ubuntu-24.04-amd64-packages.zip, debian-12-arm64-packages.zip
+#   - Users download only the archive they need for their system
+#   - SHA256SUMS file included for verification
 #
 # Merge Considerations:
 #   - This is a fork-specific workflow file
@@ -47,23 +54,25 @@ jobs:
 
       # Download all available artifacts from the completed packaging workflow
       # Using GitHub CLI which is pre-installed in ubuntu-latest runners
-      # This will only download artifacts that were successfully created
+      # GitHub Actions automatically packages artifacts as zip files
+      # We keep them as zips instead of extracting individual packages
       - name: Download Available Artifacts from Packaging Workflow
         id: download-artifacts
         continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "Downloading artifacts from workflow run: ${{ github.event.workflow_run.id }}"
-          mkdir -p packages
+          echo "Downloading artifact archives from workflow run: ${{ github.event.workflow_run.id }}"
+          mkdir -p artifact-archives
 
-          # Download artifacts (will succeed even if some are missing)
-          if gh run download ${{ github.event.workflow_run.id }} --dir packages/ 2>&1 | tee download.log; then
+          # Download artifacts as zip files
+          # gh run download preserves the GitHub Actions zip format
+          if gh run download ${{ github.event.workflow_run.id }} --dir artifact-archives/ 2>&1 | tee download.log; then
             echo "✅ Artifact download completed"
             echo "success=true" >> $GITHUB_OUTPUT
           else
             # Check if any artifacts were downloaded despite errors
-            if [ -n "$(find packages/ -type f 2>/dev/null)" ]; then
+            if [ -n "$(find artifact-archives/ -type d -mindepth 1 2>/dev/null)" ]; then
               echo "⚠️ Partial download - some artifacts may be missing"
               echo "success=partial" >> $GITHUB_OUTPUT
             else
@@ -72,72 +81,106 @@ jobs:
             fi
           fi
 
-          echo "Downloaded content:"
-          ls -la packages/ || echo "No packages directory"
+          echo "Downloaded artifact directories:"
+          ls -la artifact-archives/ || echo "No artifact-archives directory"
 
-      # Organize packages by extracting all .deb and .rpm files
+      # Create zip archives from downloaded artifacts
       # The packaging workflow creates artifacts named like:
       #   - debian-12-amd64-packages
       #   - ubuntu-24.04-arm64-packages
       #   - rockylinux-9-x86_64-packages
-      # Each artifact directory contains the actual .deb or .rpm files
-      - name: Organize Packages for Release
+      # gh run download extracts them to directories, we need to re-zip them
+      - name: Create Zip Archives for Release
         id: organize
         if: steps.download-artifacts.outputs.success != 'false'
         continue-on-error: true
         run: |
-          echo "Organizing packages..."
+          echo "Creating zip archives from artifacts..."
           mkdir -p release-assets
 
-          # Find and copy all package files to release-assets directory
-          find packages/ -type f \( -name "*.deb" -o -name "*.rpm" -o -name "*.ddeb" \) -exec cp -v {} release-assets/ \; 2>/dev/null || true
+          # Count artifacts
+          ARTIFACT_COUNT=0
+          DEB_ARCHIVE_COUNT=0
+          RPM_ARCHIVE_COUNT=0
 
-          # Check if we have any packages
-          PACKAGE_COUNT=$(find release-assets/ -type f \( -name "*.deb" -o -name "*.rpm" \) 2>/dev/null | wc -l)
+          # Process each artifact directory
+          cd artifact-archives
+          for artifact_dir in */; do
+            if [ -d "$artifact_dir" ]; then
+              ARTIFACT_NAME="${artifact_dir%/}"
+              echo "Processing artifact: $ARTIFACT_NAME"
 
-          if [ "$PACKAGE_COUNT" -eq 0 ]; then
-            echo "❌ No packages found to upload"
-            echo "has_packages=false" >> $GITHUB_OUTPUT
+              # Check if directory contains any package files
+              if [ -n "$(find "$artifact_dir" -type f \( -name "*.deb" -o -name "*.rpm" -o -name "*.ddeb" \) 2>/dev/null)" ]; then
+                # Create zip archive from the artifact directory
+                zip -r "../release-assets/${ARTIFACT_NAME}.zip" "$ARTIFACT_NAME" >/dev/null 2>&1
+
+                if [ -f "../release-assets/${ARTIFACT_NAME}.zip" ]; then
+                  ARTIFACT_COUNT=$((ARTIFACT_COUNT + 1))
+
+                  # Count by type (check if it contains .deb or .rpm)
+                  if find "$artifact_dir" -name "*.deb" 2>/dev/null | grep -q .; then
+                    DEB_ARCHIVE_COUNT=$((DEB_ARCHIVE_COUNT + 1))
+                  elif find "$artifact_dir" -name "*.rpm" 2>/dev/null | grep -q .; then
+                    RPM_ARCHIVE_COUNT=$((RPM_ARCHIVE_COUNT + 1))
+                  fi
+
+                  echo "✅ Created: ${ARTIFACT_NAME}.zip"
+                else
+                  echo "⚠️  Failed to create zip for: $ARTIFACT_NAME"
+                fi
+              else
+                echo "⚠️  Skipping $ARTIFACT_NAME - no package files found"
+              fi
+            fi
+          done
+          cd ..
+
+          # Check if we have any archives
+          if [ "$ARTIFACT_COUNT" -eq 0 ]; then
+            echo "❌ No package archives created"
+            echo "has_archives=false" >> $GITHUB_OUTPUT
             exit 0
           fi
 
-          echo "has_packages=true" >> $GITHUB_OUTPUT
+          echo "has_archives=true" >> $GITHUB_OUTPUT
 
           # Display what we're going to upload
-          echo "Packages ready for release:"
+          echo ""
+          echo "📦 Package archives ready for release:"
           ls -lh release-assets/
 
-          # Count packages by type
-          DEB_COUNT=$(find release-assets/ -name "*.deb" 2>/dev/null | wc -l)
-          RPM_COUNT=$(find release-assets/ -name "*.rpm" 2>/dev/null | wc -l)
-          echo "package_count=$PACKAGE_COUNT" >> $GITHUB_OUTPUT
-          echo "deb_count=$DEB_COUNT" >> $GITHUB_OUTPUT
-          echo "rpm_count=$RPM_COUNT" >> $GITHUB_OUTPUT
+          # Save counts
+          echo "archive_count=$ARTIFACT_COUNT" >> $GITHUB_OUTPUT
+          echo "deb_archive_count=$DEB_ARCHIVE_COUNT" >> $GITHUB_OUTPUT
+          echo "rpm_archive_count=$RPM_ARCHIVE_COUNT" >> $GITHUB_OUTPUT
 
-          echo "Total: $DEB_COUNT .deb packages, $RPM_COUNT .rpm packages"
+          echo ""
+          echo "Total: $ARTIFACT_COUNT archives ($DEB_ARCHIVE_COUNT deb-based, $RPM_ARCHIVE_COUNT rpm-based)"
 
-      # Generate SHA256 checksums for package verification
+      # Generate SHA256 checksums for archive verification
       - name: Generate Checksums
-        if: steps.organize.outputs.has_packages == 'true'
+        if: steps.organize.outputs.has_archives == 'true'
         continue-on-error: true
         working-directory: release-assets
         run: |
-          echo "Generating SHA256 checksums..."
-          sha256sum * > SHA256SUMS 2>/dev/null || true
+          echo "Generating SHA256 checksums for archives..."
+          sha256sum *.zip > SHA256SUMS 2>/dev/null || true
+          echo ""
           echo "Checksums generated:"
           cat SHA256SUMS
 
       # Determine build status for release notes
       - name: Determine Build Status
         id: status
-        if: steps.organize.outputs.has_packages == 'true'
+        if: steps.organize.outputs.has_archives == 'true'
         run: |
           if [ "${{ github.event.workflow_run.conclusion }}" = "success" ]; then
             echo "status_emoji=✅" >> $GITHUB_OUTPUT
             echo "status_text=All package builds succeeded" >> $GITHUB_OUTPUT
           elif [ "${{ steps.download-artifacts.outputs.success }}" = "partial" ]; then
             echo "status_emoji=⚠️" >> $GITHUB_OUTPUT
-            echo "status_text=Partial build - some packages may have failed" >> $GITHUB_OUTPUT
+            echo "status_text=Partial build - some package builds may have failed" >> $GITHUB_OUTPUT
           else
             echo "status_emoji=⚠️" >> $GITHUB_OUTPUT
             echo "status_text=Some package builds failed - only successful builds included" >> $GITHUB_OUTPUT
@@ -146,7 +189,7 @@ jobs:
       # Create or update the "latest" release
       # This removes old artifacts and uploads new ones
       - name: Create/Update Latest Release
-        if: steps.organize.outputs.has_packages == 'true'
+        if: steps.organize.outputs.has_archives == 'true'
         uses: ncipollo/release-action@v1
         with:
           # Allow updating existing release
@@ -156,7 +199,7 @@ jobs:
           # This keeps the release clean and prevents accumulation
           removeArtifacts: true
 
-          # Upload all packages and checksums
+          # Upload all archive files and checksums
           artifacts: 'release-assets/*'
 
           # Release body with build information
@@ -173,39 +216,83 @@ jobs:
             - **Commit**: ${{ github.event.workflow_run.head_sha }}
             - **Build Date**: ${{ github.event.workflow_run.updated_at }}
             - **Workflow Run**: [${{ github.event.workflow_run.id }}](${{ github.event.workflow_run.html_url }})
-            - **Packages Included**: ${{ steps.organize.outputs.package_count }} (${{ steps.organize.outputs.deb_count }} .deb, ${{ steps.organize.outputs.rpm_count }} .rpm)
+            - **Package Archives**: ${{ steps.organize.outputs.archive_count }} archives (${{ steps.organize.outputs.deb_archive_count }} deb-based, ${{ steps.organize.outputs.rpm_archive_count }} rpm-based)
 
-            ### Available Packages
+            ### Archive Structure
 
-            #### Debian-based Distributions (.deb)
-            - Debian 11, 12
-            - Ubuntu 20.04, 22.04, 24.04, 24.10
-            - Architectures: amd64, arm64, armhf, i386
+            Each `.zip` file contains packages for a specific **distribution + version + architecture** combination:
+            - `debian-{version}-{arch}-packages.zip` - Debian packages
+            - `ubuntu-{version}-{arch}-packages.zip` - Ubuntu packages
+            - `rockylinux-{version}-{arch}-packages.zip` - Rocky Linux packages
+            - `fedora-{version}-{arch}-packages.zip` - Fedora packages
+            - And more...
 
-            #### RPM-based Distributions (.rpm)
-            - AlmaLinux 8, 9
-            - Amazon Linux 2, 2023
-            - CentOS 7, 9
-            - CentOS Stream 8, 9
-            - Fedora 39, 40, 41
-            - OpenSUSE 15.5, 15.6
-            - Oracle Linux 8, 9
-            - Rocky Linux 8, 9
-            - Architectures: x86_64, aarch64
+            ### Available Distributions
 
-            ### Installation
+            #### Debian-based (.deb packages)
+            - **Debian**: 11, 12
+            - **Ubuntu**: 20.04, 22.04, 24.04, 24.10
+            - **Architectures**: amd64, arm64, armhf, i386
 
-            1. Download the appropriate package for your distribution and architecture
-            2. Verify the checksum: `sha256sum -c SHA256SUMS --ignore-missing`
-            3. Install:
-               - Debian/Ubuntu: `sudo dpkg -i netdata_*.deb && sudo apt-get install -f`
-               - RHEL/CentOS/Fedora: `sudo rpm -i netdata-*.rpm`
+            #### RPM-based (.rpm packages)
+            - **AlmaLinux**: 8, 9
+            - **Amazon Linux**: 2, 2023
+            - **CentOS**: 7, 9
+            - **CentOS Stream**: 8, 9
+            - **Fedora**: 39, 40, 41
+            - **OpenSUSE**: 15.5, 15.6
+            - **Oracle Linux**: 8, 9
+            - **Rocky Linux**: 8, 9
+            - **Architectures**: x86_64, aarch64
+
+            ### Installation Instructions
+
+            #### Step 1: Download
+            Download the archive for your distribution, version, and architecture:
+            ```bash
+            # Example for Ubuntu 24.04 on amd64
+            wget https://github.com/${{ github.repository }}/releases/download/latest/ubuntu-24.04-amd64-packages.zip
+            ```
+
+            #### Step 2: Verify Checksum
+            ```bash
+            # Download checksum file
+            wget https://github.com/${{ github.repository }}/releases/download/latest/SHA256SUMS
+
+            # Verify the archive
+            sha256sum -c SHA256SUMS --ignore-missing
+            ```
+
+            #### Step 3: Extract Archive
+            ```bash
+            # Extract the zip file
+            unzip ubuntu-24.04-amd64-packages.zip
+
+            # Navigate to extracted directory
+            cd ubuntu-24.04-amd64-packages/
+            ```
+
+            #### Step 4: Install Packages
+
+            **For Debian/Ubuntu (.deb):**
+            ```bash
+            sudo dpkg -i netdata_*.deb
+            sudo apt-get install -f  # Fix any dependency issues
+            ```
+
+            **For RHEL/CentOS/Fedora/Rocky (.rpm):**
+            ```bash
+            sudo rpm -i netdata-*.rpm
+            # or
+            sudo dnf install netdata-*.rpm
+            ```
 
             ### Notes
-            - Packages are unsigned (fork build)
+            - ⚠️ Packages are **unsigned** (fork build)
             - For official signed packages, visit https://github.com/netdata/netdata
             - Use `--force-confold` with dpkg if you have custom configurations
-            - If some packages are missing, check the [workflow run](${{ github.event.workflow_run.html_url }}) for build errors
+            - Each archive may contain multiple package files (main package + plugins)
+            - If some archives are missing, check the [workflow run](${{ github.event.workflow_run.html_url }}) for build errors
 
           # Mark as latest release
           makeLatest: true
@@ -224,21 +311,21 @@ jobs:
 
       # Summary of what was uploaded
       - name: Release Summary
-        if: steps.organize.outputs.has_packages == 'true'
+        if: steps.organize.outputs.has_archives == 'true'
         run: |
           echo "✅ Release 'Latest Packages' has been updated successfully!"
           echo ""
-          echo "📦 Uploaded packages (${{ steps.organize.outputs.package_count }} total):"
-          echo "   - ${{ steps.organize.outputs.deb_count }} .deb packages"
-          echo "   - ${{ steps.organize.outputs.rpm_count }} .rpm packages"
+          echo "📦 Uploaded package archives (${{ steps.organize.outputs.archive_count }} total):"
+          echo "   - ${{ steps.organize.outputs.deb_archive_count }} Debian-based archives (.deb packages)"
+          echo "   - ${{ steps.organize.outputs.rpm_archive_count }} RPM-based archives (.rpm packages)"
           echo ""
           echo "🔗 View release at: ${{ github.server_url }}/${{ github.repository }}/releases/tag/latest"
 
-      # Handle case where no packages were found
-      - name: No Packages Warning
-        if: steps.organize.outputs.has_packages != 'true'
+      # Handle case where no archives were created
+      - name: No Archives Warning
+        if: steps.organize.outputs.has_archives != 'true'
         run: |
-          echo "⚠️ No packages were available to upload to release"
+          echo "⚠️ No package archives were available to upload to release"
           echo "This might mean:"
           echo "  - All package builds failed in the packaging workflow"
           echo "  - No artifacts were generated"
